@@ -16,7 +16,6 @@ import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.newTvSeriesLoadResponse
-import com.lagradost.cloudstream3.toRatingInt
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
@@ -38,6 +37,8 @@ class KinoTronProvider : MainAPI() {
         TvType.TvSeries,
         TvType.Anime
     )
+
+    val fileRegex = "file\\s*:\\s*[\"']([^\",']+?)[\"']".toRegex()
 
     // Sections
     override val mainPage = mainPageOf(
@@ -123,20 +124,18 @@ class KinoTronProvider : MainAPI() {
         // Return to app
         // Parse Episodes as Series
         return if (tvType != TvType.Movie) {
-            val playerRawJson = app.get(playerUrl).document.select("script").html()
-                .substringAfterLast("file:\'")
-                .substringBefore("\',")
+            val playerRawJson = fileRegex.find(app.get(playerUrl).document.select("script").html())?.groups?.get(1)?.value ?: ""
 
             AppUtils.tryParseJson<List<PlayerJson>>(playerRawJson)?.map { dubs -> // Dubs
                 for(season in dubs.folder){                              // Seasons
                     for(episode in season.folder){                       // Episodes
                         episodes.add(
-                             newEpisode("${season.title}, ${episode.title}, $playerUrl") {
+                             newEpisode("${season.title}|${episode.title}|$playerUrl") {
                                 this.name = episode.title
                                 this.season = season.title.replace(" Сезон ","").toIntOrNull()
                                 this.episode = episode.title.replace("Серія ","").toIntOrNull()
                                 this.posterUrl = episode.poster
-                                this.data = "${season.title}, ${episode.title}, $playerUrl"
+                                this.data = "${season.title}|${episode.title}|$playerUrl"
                             }
                         )
                     }
@@ -150,7 +149,7 @@ class KinoTronProvider : MainAPI() {
                 this.score = Score.from10(rating)
             }
         } else { // Parse as Movie.
-            newMovieLoadResponse(title, url, TvType.Movie, "$title, $playerUrl") {
+            newMovieLoadResponse(title, url, TvType.Movie, "${title.replace("|", "")}|$playerUrl") {
                 this.posterUrl = poster
                 this.year = year
                 this.plot = description
@@ -168,25 +167,22 @@ class KinoTronProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val dataList = data.split(", ")
+        val dataList = data.split("|")
 
         // Its film, parse one m3u8
         if(dataList.size == 2){
-            val m3u8Url = app.get(dataList[1]).document.select("script").html()
-                .substringAfterLast("file:\'")
-                .substringBefore("\',")
+
+            val m3u8Url = fileRegex.find(app.get(dataList[1]).document.select("script").html())?.groups?.get(1)?.value ?: ""
             M3u8Helper.generateM3u8(
                 source = dataList[0],
                 streamUrl = m3u8Url,
-                referer = "https://tortuga.wtf/"
+                referer = mainUrl
             ).dropLast(1).forEach(callback)
 
             return true
         }
 
-        val playerRawJson = app.get(dataList[2]).document.select("script").html()
-            .substringAfterLast("file:\'")
-            .substringBefore("\',")
+        val playerRawJson = fileRegex.find(app.get(dataList[2]).document.select("script").html())?.groups?.get(1)?.value ?: ""
 
         AppUtils.tryParseJson<List<PlayerJson>>(playerRawJson)?.map { dubs ->   // Dubs
             for(season in dubs.folder){                                // Seasons

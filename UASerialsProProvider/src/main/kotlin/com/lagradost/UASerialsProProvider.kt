@@ -14,6 +14,7 @@ import com.lagradost.cloudstream3.Score
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.addDubStatus
 import com.lagradost.cloudstream3.addEpisodes
 import com.lagradost.cloudstream3.app
@@ -62,10 +63,11 @@ class UASerialsProProvider : MainAPI() {
     // Sections
     override val mainPage = mainPageOf(
         "$mainUrl/series/page/" to "Серіали",
+        "$mainUrl/films/page/" to "Фільми",
         "$mainUrl/cartoons/page/" to "Мультсеріали",
         "$mainUrl/fcartoon/page/" to "Мультфільми",
         "$mainUrl/anime/page/" to "Аніме",
-        "$mainUrl/films/page/" to "Фільми"
+        "$mainUrl/exclusive/page/" to "Ексклюзив",
     )
 
     // Main Page
@@ -76,10 +78,9 @@ class UASerialsProProvider : MainAPI() {
     private val posterSelector = ".img-fit img"
 
     // Load info
-    // private val titleLoadSelector = ".page__subcol-main h1"
-    // private val genresSelector = "li span:contains(Жанр:) a"
-    private val yearSelector = "a[href*=https://uaserials.pro/year/]"
-    // private val playerSelector = "iframe"
+    private val genresSelector = ".short-list li:contains(Жанр) a"
+    private val actorsSelector = ".short-list li:contains(Актори) a"
+    private val yearSelector = ".short-list a[href*=/year/]"
     private val descriptionSelector = ".full-text"
     private val ratingSelector = ".short-rate-in"
 
@@ -90,7 +91,12 @@ class UASerialsProProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val document = app.get(request.data + page).document
+        val url = if (page <= 1) {
+            request.data.removeSuffix("page/")
+        } else {
+            "${request.data}$page/"
+        }
+        val document = app.get(url).document
 
         val home = document.select(animeSelector).map {
             it.toSearchResponse()
@@ -109,50 +115,46 @@ class UASerialsProProvider : MainAPI() {
             this.posterUrl = posterUrl
             addDubStatus(isDub = true)
         }
-
     }
 
     override suspend fun quickSearch(query: String): List<SearchResponse> = search(query)
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.post(
-            url = mainUrl,
-            data = mapOf(
-                "do" to "search",
-                "subaction" to "search",
-                "story" to query.replace(" ", "+")
-            )
-        ).document
+        val encodedQuery = java.net.URLEncoder.encode(query, "utf-8").replace("+", "%20")
+        val document = app.get("$mainUrl/search/$encodedQuery/").document
 
-        return document.select(animeSelector).map {
-            it.toSearchResponse()
+        return document.select(".uas-card").map {
+            val title = it.selectFirst(".uas-card__title")?.text()?.trim().toString()
+            val engTitle = it.selectFirst(".uas-card__orig")?.text()?.trim().toString()
+            val href = it.attr("href")
+            val rawPoster = it.selectFirst(".uas-card__img")?.attr("data-src")
+            val posterUrl = if (rawPoster?.startsWith("/") == true) "$mainUrl$rawPoster" else rawPoster
+
+            newAnimeSearchResponse(title, href, TvType.Anime) {
+                this.otherName = engTitle
+                this.posterUrl = posterUrl
+                addDubStatus(isDub = true)
+            }
         }
     }
 
     // Detailed information
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
-        // Parse info
+        val document = app.get(url, headers = mapOf("User-Agent" to USER_AGENT)).document
 
         val title = document.select(".short-title").text()
         val engTitle = document.select(".oname").text()
         val poster = document.selectFirst("div.fimg.img-wide img")?.attr("src")
         val tags = mutableListOf<String>()
         val actors = mutableListOf<String>()
-        val year = document.select(yearSelector).text().substringAfter(": ").substringBefore("-").toIntOrNull()
+        val year = document.selectFirst(yearSelector)?.text()?.toIntOrNull()
         val rating = document.selectFirst(ratingSelector)!!.text()
 
-        document.select(".short-list li").forEach { menu ->
-            with(menu){
-                when{
-                    this.select("span").text() == "Жанр:" -> menu.select("a").map { tags.add(it.text()) }
-                    this.select("span").text() == "Актори:" -> menu.select("#text").text().split(", ").map { actors.add(it) }
-                }
-            }
-        }
+        document.select(genresSelector).forEach { tags.add(it.text()) }
+        document.select(actorsSelector).forEach { actors.add(it.text()) }
 
-        val tvType = with(tags){
-            when{
+        val tvType = with(tags) {
+            when {
                 contains("Серіал") -> TvType.TvSeries
                 contains("Мультсеріал") -> TvType.Cartoon
                 contains("Фільм") -> TvType.Movie
@@ -162,7 +164,6 @@ class UASerialsProProvider : MainAPI() {
             }
         }
         val description = document.selectFirst(descriptionSelector)?.text()?.trim()
-        // val rating = document.select(ratingSelector).next().text().toRatingInt()
 
         val recommendations = document.select(animeSelector).map {
             it.toSearchResponse()
@@ -175,28 +176,63 @@ class UASerialsProProvider : MainAPI() {
             ),
             "297796CCB81D25512",
             false
-        ).replace("\\", "").substringBeforeLast("]") + "]"
+        ).replace("\\", "")
+        val lastBracket = decryptData.lastIndexOf("]")
+        val cleanJson = if (lastBracket != -1) decryptData.substring(0, lastBracket + 1) else decryptData
 
-        val seriesJson = Gson().fromJson<List<DecodedJSON>>(decryptData, listDecodedJSONModel)
-        val movieJson = Gson().fromJson<List<AESPlayerDecodedModel>>(decryptData, listAESModel)
+        val playerTabs = Gson().fromJson<List<AESPlayerDecodedModel>>(cleanJson, listAESModel)
+        val playerUrl = playerTabs.firstOrNull { it.tabName == "Плеєр" }?.url ?: playerTabs.firstOrNull()?.url
 
-        // Return to app
-        // Parse Episodes as Series
-        return if (seriesJson[0].seasons != null) {
+        val playerHtml = if (playerUrl != null) {
+            app.get(playerUrl, headers = mapOf("User-Agent" to USER_AGENT, "Referer" to mainUrl)).text
+        } else {
+            ""
+        }
+
+        val encodedFile = fileRegex.find(playerHtml)?.groups?.get(1)?.value ?: ""
+        val decodedFile = if (encodedFile.isNotBlank()) {
+            if (encodedFile.startsWith("http")) encodedFile
+            else Decoder.tortugaDecode(encodedFile) ?: ""
+        } else {
+            ""
+        }
+
+        val subRaw = subsRegex.find(playerHtml)?.groups?.get(1)?.value ?: ""
+        val subtitleUrl = when {
+            subRaw.startsWith("[") -> subRaw
+            subRaw.isNotBlank() -> Decoder.tortugaDecode(subRaw) ?: ""
+            else -> ""
+        }
+
+        val listTortugaSeasonModel = object : TypeToken<List<TortugaSeason>>() { }.type
+        val tortugaSeasons = try {
+            if (decodedFile.startsWith("[")) {
+                Gson().fromJson<List<TortugaSeason>>(decodedFile, listTortugaSeasonModel)
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+
+        return if (tortugaSeasons != null) {
             val episodes = mutableListOf<Episode>()
 
-            seriesJson[0].seasons.forEachIndexed { seasonsIndex, season ->
-                    season.episodes.forEachIndexed { episodesIndex, episode ->
-                        episodes.add(
-                            newEpisode("$seasonsIndex, $episodesIndex, $url") {
-                                this.name = episode.title
-                                this.season = seasonsIndex + 1
-                                this.episode = episodesIndex + 1
-                                this.data = "$seasonsIndex, $episodesIndex, $url"
-                            }
-                        )
-                    }
+            tortugaSeasons.forEachIndexed { seasonsIndex, season ->
+                val seasonNum = season.season.toIntOrNull() ?: (seasonsIndex + 1)
+                season.folder.forEachIndexed { episodesIndex, episode ->
+                    val epNum = episode.number.toIntOrNull() ?: (episodesIndex + 1)
+                    val episodeData = "${episode.file}|${episode.subtitle ?: ""}"
+                    episodes.add(
+                        newEpisode(episodeData) {
+                            this.name = episode.title
+                            this.season = seasonNum
+                            this.episode = epNum
+                            this.data = episodeData
+                        }
+                    )
                 }
+            }
 
             newAnimeLoadResponse(title, url, tvType) {
                 this.posterUrl = poster
@@ -207,46 +243,63 @@ class UASerialsProProvider : MainAPI() {
                 this.tags = tags
                 this.recommendations = recommendations
                 addEpisodes(DubStatus.Dubbed, episodes)
+                addActors(actors)
             }
-        } else { // Parse as Movie.
-            newMovieLoadResponse(title, url, TvType.Movie, "$title, ${movieJson[0].url}") {
+        } else {
+            newMovieLoadResponse(title, url, TvType.Movie, "${title.replace("|", "")}|${playerTabs[0].url}") {
                 this.posterUrl = poster
                 this.score = Score.from10(rating)
                 this.year = year
                 this.plot = description
                 this.tags = tags
                 this.recommendations = recommendations
+                addActors(actors)
             }
         }
     }
 
-    // It works when I click to view the series
     override suspend fun loadLinks(
-        data: String, // (Serial) [Season Index, Episode Name, url] | (Film) [Title, Player Url]
+        data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val dataList = data.split(", ")
+        val dataList = data.split("|")
+
         // Movie
-        if(dataList.size == 2){
-            val html = app.get(dataList[1],
+        if (dataList.size == 2 && !dataList[0].startsWith("http") && !dataList[0].startsWith("{")) {
+            val html = app.get(
+                dataList[1],
                 headers = mapOf(
                     "User-Agent" to USER_AGENT,
                     "Referer" to mainUrl
-                )).document.select("script[type=text/javascript]").html()
+                )
+            ).text
 
-            val m3u8Url = fileRegex.find(html)?.groups?.get(1)?.value ?: ""
+            val m3u8Raw = fileRegex.find(html)?.groups?.get(1)?.value ?: ""
+            val m3u8Url = when {
+                m3u8Raw.startsWith("http") -> m3u8Raw
+                m3u8Raw.isNotBlank() -> Decoder.tortugaDecode(m3u8Raw) ?: ""
+                else -> ""
+            }
+
+            if (m3u8Url.isBlank()) return false
 
             M3u8Helper.generateM3u8(
                 source = dataList[0],
-                streamUrl = if (m3u8Url.startsWith("http")) m3u8Url else Decoder.decodeAndReverse(m3u8Url)!!,
-                referer = "https://tortuga.wtf/",
+                streamUrl = m3u8Url,
+                referer = "https://tortuga.tw/",
             ).dropLast(1).forEach(callback)
 
-            val subtitleUrl = Decoder.decodeAndReverse(subsRegex.find(html)?.groups?.get(1)?.value ?: "")
+            val subRaw = subsRegex.find(html)?.groups?.get(1)?.value ?: ""
+            val subtitleUrl = when {
+                subRaw.startsWith("[") -> subRaw
+                subRaw.isNotBlank() -> Decoder.tortugaDecode(subRaw) ?: ""
+                else -> ""
+            }
 
-            if(subtitleUrl.isNullOrBlank()) return true
+            if (subtitleUrl.isBlank()) return true
+
             subtitleCallback.invoke(
                 newSubtitleFile(
                     subtitleUrl.substringAfterLast("[").substringBefore("]"),
@@ -257,47 +310,62 @@ class UASerialsProProvider : MainAPI() {
             return true
         }
 
-        // Serials
-        val document = app.get(dataList[2]).document
-        val decryptData = cryptojsAESHandler(
-            Gson().fromJson(
-                document.select("div.fplayer player-control").attr("data-tag1"),
-                AesData::class.java,
-            ),
-            "297796CCB81D25512",
-            false
-        ).replace("\\", "").substringBeforeLast("]") + "]"
-        // Log.d("CakesTwix-Debug", decryptData)
-        Gson().fromJson<List<DecodedJSON>>(decryptData, listDecodedJSONModel)[0]
-            .seasons[dataList[0].toInt()].episodes[dataList[1].toInt()].sounds.forEach { episode ->
-                val playerData = app.get(episode.url,
-                    headers = mapOf(
-                        "User-Agent" to USER_AGENT,
-                        "Referer" to mainUrl
-                    ))
+        // Serial Episode
+        val fileStr = dataList[0]
+        val subtitleStr = if (dataList.size > 1) dataList[1] else ""
 
-                val m3u8Url = fileRegex.find(playerData.document.select("script[type=text/javascript]").html())?.groups?.get(1)?.value ?: ""
+        if (fileStr.isBlank()) return false
+
+        fileStr.split(";").forEach { track ->
+            if (track.isNotBlank()) {
+                val subTailMatch = "\\(subtitle:(.*)\\)$".toRegex().find(track)
+                val cleanTrack = if (subTailMatch != null) {
+                    track.substring(0, subTailMatch.range.first)
+                } else {
+                    track
+                }
+
+                val m3u8Url = cleanTrack.substringAfter("}")
+                val name = if (cleanTrack.contains("{")) {
+                    cleanTrack.substringAfter("{").substringBefore("}")
+                } else {
+                    "Плеєр"
+                }
 
                 M3u8Helper.generateM3u8(
-                    source = episode.title,
-                    streamUrl = if (m3u8Url.startsWith("http")) m3u8Url else Decoder.decodeAndReverse(m3u8Url)!!,
-                    referer = mainUrl
+                    source = name,
+                    streamUrl = m3u8Url,
+                    referer = "https://tortuga.tw/",
                 ).dropLast(1).forEach(callback)
 
-                val subtitleUrl = Decoder.decodeAndReverse(subsRegex.find(playerData.document.select("script[type=text/javascript]").html())?.groups?.get(1)?.value ?: "")
-
-                subtitleCallback.invoke(
-                    newSubtitleFile(
-                        subtitleUrl!!.substringAfterLast("[").substringBefore("]"),
-                        subtitleUrl.substringAfter("]")
-                    )
-                )
+                subTailMatch?.groupValues?.get(1)?.takeIf { it.isNotBlank() }?.split(",")?.forEach { sub ->
+                    if (sub.isNotBlank()) {
+                        val subName = sub.substringAfter("[").substringBefore("]")
+                        val subUrl = sub.substringAfter("]")
+                        subtitleCallback.invoke(
+                            newSubtitleFile(subName, subUrl)
+                        )
+                    }
+                }
             }
+        }
+
+        if (subtitleStr.isNotBlank()) {
+            subtitleStr.split(",").forEach { sub ->
+                if (sub.isNotBlank()) {
+                    val subName = sub.substringAfter("[").substringBefore("]")
+                    val subUrl = sub.substringAfter("]")
+                    subtitleCallback.invoke(
+                        newSubtitleFile(subName, subUrl)
+                    )
+                }
+            }
+        }
+
         return true
     }
 
     // THANKS to Hexated!
-    // https://github.com/hexated/cloudstream-extensions-hexated/blob/master/OnetwothreeTv/src/main/kotlin/com/hexated/OnetwothreeTv.kt
     private fun cryptojsAESHandler(
         data: AesData,
         pass: String,
@@ -321,7 +389,6 @@ class UASerialsProProvider : MainAPI() {
                 IvParameterSpec(data.iv.decodeHex())
             )
             base64Encode(cipher.doFinal(data.ct.toByteArray()))
-
         }
     }
 
@@ -339,42 +406,92 @@ class UASerialsProProvider : MainAPI() {
         @SerializedName("iterations") val iterations: Int = 999,
     )
 
+    data class TortugaSeason(
+        @SerializedName("title") val title: String,
+        @SerializedName("number") val number: String,
+        @SerializedName("season") val season: String,
+        @SerializedName("folder") val folder: List<TortugaEpisode>
+    )
+
+    data class TortugaEpisode(
+        @SerializedName("id") val id: String,
+        @SerializedName("title") val title: String,
+        @SerializedName("number") val number: String,
+        @SerializedName("file") val file: String,
+        @SerializedName("poster") val poster: String? = null,
+        @SerializedName("subtitle") val subtitle: String? = null
+    )
+
     object Decoder {
 
-        /**
-         * Декодує рядок із формату Base64.
-         * @param encodedString Закодований рядок (Base64).
-         * @return Декодований рядок (String) або null у разі помилки.
-         */
-        @OptIn(ExperimentalEncodingApi::class)
+        // Tortuga player XOR декодер (tor.core.min.js #w + #_ функції)
+        // Алгоритм: перший байт = сіль, далі XOR з (salt + 7*i + 13) % 256
+        fun tortugaDecode(encoded: String): String? {
+    if (encoded.isBlank()) return encoded
+    return try {
+        val clean = encoded.trimEnd('=')
+        val decoded = android.util.Base64.decode(clean, android.util.Base64.DEFAULT)
+        if (decoded.isEmpty()) return encoded
+
+        val salt = decoded[0].toInt() and 0xFF
+        
+        val resultBytes = ByteArray(decoded.size - 1)
+
+        for (i in 1 until decoded.size) {
+            val key = (salt + 7 * (i - 1) + 13) % 256
+            resultBytes[i - 1] = ((decoded[i].toInt() and 0xFF) xor key).toByte()
+        }
+
+        String(resultBytes, Charsets.UTF_8)
+    } catch (e: Exception) {
+        null
+    }
+        }
+
+        fun torDecrypt(encoded: String): String {
+            if (encoded.isEmpty()) return ""
+            return try {
+                val cleaned = encoded.replace(Regex("[^A-Za-z0-9+/]"), "")
+                val pad = cleaned.length % 4
+                val cleanEncoded = cleaned + if (pad > 1) "=".repeat(4 - pad) else ""
+
+                val decoded = android.util.Base64.decode(cleanEncoded, android.util.Base64.DEFAULT)
+                if (decoded.size < 2) return ""
+
+                val saltChar = decoded[0].toInt() and 0xFF
+                val decryptedBytes = ByteArray(decoded.size - 1)
+
+                for (i in 1 until decoded.size) {
+                    val f = (saltChar + 7 * (i - 1) + 13) % 256
+                    decryptedBytes[i - 1] = (decoded[i].toInt() xor f).toByte()
+                }
+
+                String(decryptedBytes, Charsets.UTF_8)
+            } catch (e: Exception) {
+                ""
+            }
+        }
+
+        @OptIn(kotlin.io.encoding.ExperimentalEncodingApi::class)
         fun decodeBase64(encodedString: String): String {
-            try {
-                return String(Base64.decode(encodedString.replace("==", "")), Charsets.UTF_8)
+            return try {
+                String(kotlin.io.encoding.Base64.decode(encodedString.replace("==", "")), Charsets.UTF_8)
             } catch (_: Exception) {
-                return String(Base64.decode(encodedString.replace("===", "=")), Charsets.UTF_8)
+                String(kotlin.io.encoding.Base64.decode(encodedString.replace("===", "=")), Charsets.UTF_8)
             }
         }
 
-        /**
-         * Реверсує (перевертає) вхідний рядок.
-         * @param inputString Рядок для реверсування.
-         * @return Реверсований рядок.
-         */
-        fun reverseText(inputString: String): String {
-            return inputString.reversed()
-        }
+        fun reverseText(inputString: String): String = inputString.reversed()
 
-        /**
-         * Комбінована функція: спочатку декодує Base64, потім реверсує результат.
-         * (Це зазвичай використовується, коли обфускація складається з двох етапів).
-         * @param encodedString Закодований рядок.
-         * @return Реверсований та декодований рядок або null.
-         */
         fun decodeAndReverse(encodedString: String): String? {
+            val tortuga = tortugaDecode(encodedString)
+            if (tortuga?.startsWith("http") == true) return tortuga
+
+            val decrypted = torDecrypt(encodedString)
+            if (decrypted.startsWith("http")) return decrypted
+
             val decoded = decodeBase64(encodedString)
-            return decoded?.let {
-                reverseText(it)
-            }
+            return decoded?.let { reverseText(it) }
         }
     }
-}
+}  

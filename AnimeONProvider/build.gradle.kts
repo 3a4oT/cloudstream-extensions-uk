@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 13
+version = 31
 
 dependencies {
     implementation(libs.gson)
@@ -13,7 +13,7 @@ cloudstream {
     // All of these properties are optional, you can safely remove them
 
     description = "AnimeON - Дивитися аніме україньскою"
-    authors = listOf("CakesTwix")
+    authors = listOf("CakesTwix","deleteBlack666")
 
     /**
      * Status int as the following:
@@ -29,5 +29,5 @@ cloudstream {
         "OVA",
     )
 
-    iconUrl = "https://www.google.com/s2/favicons?domain=animeon.club&sz=%size%"
+    iconUrl = "https://animeon.club/assets/images/short-logo.png"
 }
